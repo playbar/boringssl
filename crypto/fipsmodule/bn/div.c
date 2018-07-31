@@ -443,11 +443,8 @@ BN_ULONG bn_reduce_once_in_place(BN_ULONG *r, BN_ULONG carry, const BN_ULONG *m,
   return carry;
 }
 
-// bn_mod_sub_words sets |r| to |a| - |b| (mod |m|), using |tmp| as scratch
-// space. Each array is |num| words long. |a| and |b| must be < |m|. Any pair of
-// |r|, |a|, and |b| may alias.
-static void bn_mod_sub_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
-                             const BN_ULONG *m, BN_ULONG *tmp, size_t num) {
+void bn_mod_sub_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
+                      const BN_ULONG *m, BN_ULONG *tmp, size_t num) {
   // r = a - b
   BN_ULONG borrow = bn_sub_words(r, a, b, num);
   // tmp = a - b + m
@@ -594,6 +591,7 @@ int bn_mod_add_consttime(BIGNUM *r, const BIGNUM *a, const BIGNUM *b,
   if (ok) {
     bn_mod_add_words(r->d, a->d, b->d, m->d, tmp->d, m->width);
     r->width = m->width;
+    r->neg = 0;
   }
   BN_CTX_end(ctx);
   return ok;
@@ -618,6 +616,7 @@ int bn_mod_sub_consttime(BIGNUM *r, const BIGNUM *a, const BIGNUM *b,
   if (ok) {
     bn_mod_sub_words(r->d, a->d, b->d, m->d, tmp->d, m->width);
     r->width = m->width;
+    r->neg = 0;
   }
   BN_CTX_end(ctx);
   return ok;

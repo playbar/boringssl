@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -38,8 +39,9 @@ const (
 )
 
 const (
-	TLS13Draft23 = 0
-	TLS13Draft28 = 1
+	TLS13Default = 0
+	TLS13Draft23 = 1
+	TLS13Draft28 = 2
 )
 
 var allTLSWireVersions = []uint16{
@@ -80,26 +82,27 @@ const (
 
 // TLS handshake message types.
 const (
-	typeHelloRequest        uint8 = 0
-	typeClientHello         uint8 = 1
-	typeServerHello         uint8 = 2
-	typeHelloVerifyRequest  uint8 = 3
-	typeNewSessionTicket    uint8 = 4
-	typeEndOfEarlyData      uint8 = 5 // draft-ietf-tls-tls13-21
-	typeHelloRetryRequest   uint8 = 6 // draft-ietf-tls-tls13-16
-	typeEncryptedExtensions uint8 = 8 // draft-ietf-tls-tls13-16
-	typeCertificate         uint8 = 11
-	typeServerKeyExchange   uint8 = 12
-	typeCertificateRequest  uint8 = 13
-	typeServerHelloDone     uint8 = 14
-	typeCertificateVerify   uint8 = 15
-	typeClientKeyExchange   uint8 = 16
-	typeFinished            uint8 = 20
-	typeCertificateStatus   uint8 = 22
-	typeKeyUpdate           uint8 = 24  // draft-ietf-tls-tls13-16
-	typeNextProtocol        uint8 = 67  // Not IANA assigned
-	typeChannelID           uint8 = 203 // Not IANA assigned
-	typeMessageHash         uint8 = 254 // draft-ietf-tls-tls13-21
+	typeHelloRequest          uint8 = 0
+	typeClientHello           uint8 = 1
+	typeServerHello           uint8 = 2
+	typeHelloVerifyRequest    uint8 = 3
+	typeNewSessionTicket      uint8 = 4
+	typeEndOfEarlyData        uint8 = 5 // draft-ietf-tls-tls13-21
+	typeHelloRetryRequest     uint8 = 6 // draft-ietf-tls-tls13-16
+	typeEncryptedExtensions   uint8 = 8 // draft-ietf-tls-tls13-16
+	typeCertificate           uint8 = 11
+	typeServerKeyExchange     uint8 = 12
+	typeCertificateRequest    uint8 = 13
+	typeServerHelloDone       uint8 = 14
+	typeCertificateVerify     uint8 = 15
+	typeClientKeyExchange     uint8 = 16
+	typeFinished              uint8 = 20
+	typeCertificateStatus     uint8 = 22
+	typeKeyUpdate             uint8 = 24  // draft-ietf-tls-tls13-16
+	typeCompressedCertificate uint8 = 25  // Not IANA assigned
+	typeNextProtocol          uint8 = 67  // Not IANA assigned
+	typeChannelID             uint8 = 203 // Not IANA assigned
+	typeMessageHash           uint8 = 254 // draft-ietf-tls-tls13-21
 )
 
 // TLS compression types.
@@ -120,21 +123,22 @@ const (
 	extensionPadding                    uint16 = 21
 	extensionExtendedMasterSecret       uint16 = 23
 	extensionTokenBinding               uint16 = 24
-	extensionQUICTransportParams        uint16 = 26
+	extensionCompressedCertAlgs         uint16 = 27
 	extensionSessionTicket              uint16 = 35
-	extensionPreSharedKey               uint16 = 41    // draft-ietf-tls-tls13-16
-	extensionEarlyData                  uint16 = 42    // draft-ietf-tls-tls13-16
-	extensionSupportedVersions          uint16 = 43    // draft-ietf-tls-tls13-16
-	extensionCookie                     uint16 = 44    // draft-ietf-tls-tls13-16
-	extensionPSKKeyExchangeModes        uint16 = 45    // draft-ietf-tls-tls13-18
-	extensionTicketEarlyDataInfo        uint16 = 46    // draft-ietf-tls-tls13-18
-	extensionCertificateAuthorities     uint16 = 47    // draft-ietf-tls-tls13-21
+	extensionPreSharedKey               uint16 = 41    // draft-ietf-tls-tls13-23
+	extensionEarlyData                  uint16 = 42    // draft-ietf-tls-tls13-23
+	extensionSupportedVersions          uint16 = 43    // draft-ietf-tls-tls13-23
+	extensionCookie                     uint16 = 44    // draft-ietf-tls-tls13-23
+	extensionPSKKeyExchangeModes        uint16 = 45    // draft-ietf-tls-tls13-23
+	extensionCertificateAuthorities     uint16 = 47    // draft-ietf-tls-tls13-23
+	extensionSignatureAlgorithmsCert    uint16 = 50    // draft-ietf-tls-tls13-23
 	extensionKeyShare                   uint16 = 51    // draft-ietf-tls-tls13-23
 	extensionCustom                     uint16 = 1234  // not IANA assigned
 	extensionNextProtoNeg               uint16 = 13172 // not IANA assigned
 	extensionRenegotiationInfo          uint16 = 0xff01
-	extensionChannelID                  uint16 = 30032 // not IANA assigned
-	extensionDummyPQPadding             uint16 = 54537 // not IANA assigned
+	extensionQUICTransportParams        uint16 = 0xffa5 // draft-ietf-quic-tls-13
+	extensionChannelID                  uint16 = 30032  // not IANA assigned
+	extensionDummyPQPadding             uint16 = 54537  // not IANA assigned
 )
 
 // TLS signaling cipher suite values
@@ -328,6 +332,16 @@ type ServerSessionCache interface {
 	Put(sessionId string, session *sessionState)
 }
 
+// CertCompressionAlg is a certificate compression algorithm, specified as a
+// pair of functions for compressing and decompressing certificates.
+type CertCompressionAlg struct {
+	// Compress returns a compressed representation of the input.
+	Compress func([]byte) []byte
+	// Decompress depresses the contents of in and writes the result to out, which
+	// will be the correct size. It returns true on success and false otherwise.
+	Decompress func(out, in []byte) bool
+}
+
 // A Config structure is used to configure a TLS client or server.
 // After one has been passed to a TLS function it must not be
 // modified. A Config may be reused; the tls package will also not
@@ -498,6 +512,8 @@ type Config struct {
 	// transport parameters extension.
 	QUICTransportParams []byte
 
+	CertCompressionAlgs map[uint16]CertCompressionAlg
+
 	// Bugs specifies optional misbehaviour to be used for testing other
 	// implementations.
 	Bugs ProtocolBugs
@@ -529,6 +545,15 @@ const (
 	RSABadValueWrongLeadingByte
 	RSABadValueNoZero
 	NumRSABadValues
+)
+
+type RSAPSSSupport int
+
+const (
+	RSAPSSSupportAny RSAPSSSupport = iota
+	RSAPSSSupportNone
+	RSAPSSSupportOnlineSignatureOnly
+	RSAPSSSupportBoth
 )
 
 type ProtocolBugs struct {
@@ -1143,6 +1168,10 @@ type ProtocolBugs struct {
 	// sessions use session tickets instead of session IDs.
 	RequireSessionTickets bool
 
+	// RequireSessionIDs, if true, causes the client to require new sessions use
+	// session IDs instead of session tickets.
+	RequireSessionIDs bool
+
 	// NullAllCiphers, if true, causes every cipher to behave like the null
 	// cipher.
 	NullAllCiphers bool
@@ -1385,9 +1414,15 @@ type ProtocolBugs struct {
 	// specified value in ServerHello version field.
 	SendServerHelloVersion uint16
 
-	// SendServerSupportedExtensionVersion, if non-zero, causes the server to send
-	// the specified value in supported_versions extension in the ServerHello.
-	SendServerSupportedExtensionVersion uint16
+	// SendServerSupportedVersionExtension, if non-zero, causes the server to send
+	// the specified value in supported_versions extension in the ServerHello (but
+	// not the HelloRetryRequest).
+	SendServerSupportedVersionExtension uint16
+
+	// OmitServerSupportedVersionExtension, if true, causes the server to
+	// omit the supported_versions extension in the ServerHello (but not the
+	// HelloRetryRequest)
+	OmitServerSupportedVersionExtension bool
 
 	// SkipHelloRetryRequest, if true, causes the TLS 1.3 server to not send
 	// HelloRetryRequest.
@@ -1489,6 +1524,15 @@ type ProtocolBugs struct {
 	// length accepted from the peer.
 	MaxReceivePlaintext int
 
+	// ExpectPackedEncryptedHandshake, if non-zero, requires that the peer maximally
+	// pack their encrypted handshake messages, fitting at most the
+	// specified number of plaintext bytes per record.
+	ExpectPackedEncryptedHandshake int
+
+	// ForbidHandshakePacking, if true, requires the peer place a record
+	// boundary after every handshake message.
+	ForbidHandshakePacking bool
+
 	// SendTicketLifetime, if non-zero, is the ticket lifetime to send in
 	// NewSessionTicket messages.
 	SendTicketLifetime time.Duration
@@ -1562,6 +1606,30 @@ type ProtocolBugs struct {
 	// SendCompressedCoordinates, if true, causes ECDH key shares over NIST
 	// curves to use compressed coordinates.
 	SendCompressedCoordinates bool
+
+	// ExpectRSAPSSSupport specifies the level of RSA-PSS support expected
+	// from the peer.
+	ExpectRSAPSSSupport RSAPSSSupport
+
+	// SetX25519HighBit, if true, causes X25519 key shares to set their
+	// high-order bit.
+	SetX25519HighBit bool
+
+	// DuplicateCompressedCertAlgs, if true, causes two, equal, certificate
+	// compression algorithm IDs to be sent.
+	DuplicateCompressedCertAlgs bool
+
+	// ExpectedCompressedCert specifies the compression algorithm ID that must be
+	// used on this connection, or zero if there are no special requirements.
+	ExpectedCompressedCert uint16
+
+	// SendCertCompressionAlgId, if not zero, sets the algorithm ID that will be
+	// sent in the compressed certificate message.
+	SendCertCompressionAlgId uint16
+
+	// SendCertUncompressedLength, if not zero, sets the uncompressed length that
+	// will be sent in the compressed certificate message.
+	SendCertUncompressedLength uint32
 }
 
 func (c *Config) serverInit() {
@@ -1690,8 +1758,8 @@ func isDraft28(vers uint16) bool {
 // it returns true and the corresponding protocol version. Otherwise, it returns
 // false.
 func (c *Config) isSupportedVersion(wireVers uint16, isDTLS bool) (uint16, bool) {
-	if (c.TLS13Variant != TLS13Draft23 && wireVers == tls13Draft23Version) ||
-		(c.TLS13Variant != TLS13Draft28 && wireVers == tls13Draft28Version) {
+	if (c.TLS13Variant == TLS13Draft23 && wireVers == tls13Draft28Version) ||
+		(c.TLS13Variant == TLS13Draft28 && wireVers == tls13Draft23Version) {
 		return 0, false
 	}
 
@@ -1999,4 +2067,51 @@ func containsGREASE(values []uint16) bool {
 		}
 	}
 	return false
+}
+
+func checkRSAPSSSupport(support RSAPSSSupport, sigAlgs, sigAlgsCert []signatureAlgorithm) error {
+	if sigAlgsCert == nil {
+		sigAlgsCert = sigAlgs
+	} else if eqSignatureAlgorithms(sigAlgs, sigAlgsCert) {
+		// The peer should have only sent the list once.
+		return errors.New("tls: signature_algorithms and signature_algorithms_cert extensions were identical")
+	}
+
+	if support == RSAPSSSupportAny {
+		return nil
+	}
+
+	var foundPSS, foundPSSCert bool
+	for _, sigAlg := range sigAlgs {
+		if sigAlg == signatureRSAPSSWithSHA256 || sigAlg == signatureRSAPSSWithSHA384 || sigAlg == signatureRSAPSSWithSHA512 {
+			foundPSS = true
+			break
+		}
+	}
+	for _, sigAlg := range sigAlgsCert {
+		if sigAlg == signatureRSAPSSWithSHA256 || sigAlg == signatureRSAPSSWithSHA384 || sigAlg == signatureRSAPSSWithSHA512 {
+			foundPSSCert = true
+			break
+		}
+	}
+
+	expectPSS := support != RSAPSSSupportNone
+	if foundPSS != expectPSS {
+		if expectPSS {
+			return errors.New("tls: peer did not support PSS")
+		} else {
+			return errors.New("tls: peer unexpectedly supported PSS")
+		}
+	}
+
+	expectPSSCert := support == RSAPSSSupportBoth
+	if foundPSSCert != expectPSSCert {
+		if expectPSSCert {
+			return errors.New("tls: peer did not support PSS in certificates")
+		} else {
+			return errors.New("tls: peer unexpectedly supported PSS in certificates")
+		}
+	}
+
+	return nil
 }
